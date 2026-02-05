@@ -1,4 +1,5 @@
 const sirinium = require('sirinium');
+const Teacher = require('./teacher');
 
 /**
  * Форматирует дату в формат iCalendar (YYYYMMDDTHHMMSS)
@@ -103,7 +104,7 @@ function createICSEvent(event, isTeacher = false) {
     if (event.comment) descriptionParts.push(`Комментарий: ${event.comment}`);
     const description = escapeICS(descriptionParts.join('\\n'));
     
-    const uid = `${event.date}-${event.startTime}-${event.group || 'schedule'}@schedule`;
+    const uid = `${event.date}-${event.startTime}-${event.classroom || 'none'}-${event.group || 'schedule'}@schedule`;
 
     return [
         'BEGIN:VEVENT',
@@ -145,48 +146,60 @@ function createICSCalendar(events, calendarName = 'Расписание', isTeac
 /**
  * Получает расписание группы на текущую и следующую недели в одном календаре
  * @param {string} group - Название/ID группы
+ * @param {Object|null} cached - Кэшированные данные { week0: [...], week1: [...] }
  * @returns {Promise<string>} - Объединенный календарь в формате iCalendar
  */
-async function getGroupCalendar(group) {
-    const client = new sirinium.Client();
-    await client.getInitialData();
+async function getGroupCalendar(group, cached = null) {
+    let currentWeek, nextWeek;
 
-    await client.changeWeek(0);
-    const currentWeek = await client.getGroupSchedule(group);
+    if (cached && cached.week0 && cached.week1) {
+        currentWeek = cached.week0;
+        nextWeek = cached.week1;
+    } else {
+        const client = new sirinium.Client();
+        await client.getInitialData();
 
-    await client.changeWeek(1);
-    const nextWeek = await client.getGroupSchedule(group);
+        await client.changeWeek(0);
+        currentWeek = await client.getGroupSchedule(group);
+
+        await client.changeWeek(1);
+        nextWeek = await client.getGroupSchedule(group);
+    }
 
     const allEvents = [...currentWeek, ...nextWeek];
-    
-    return createICSCalendar(allEvents, `Расписание ${group} - 2 недели`);
+
+    return createICSCalendar(allEvents, `Расписание ${group}`);
 }
 
 /**
  * Получает расписание преподавателя на текущую и следующую недели в одном календаре
  * @param {string} teacherId - ID преподавателя
+ * @param {Object|null} cached - Кэшированные данные { week0: [...], week1: [...] }
  * @returns {Promise<string>} - Объединенный календарь в формате iCalendar
  */
-async function getTeacherCalendar(teacherId) {
-    // Импортируем класс Teacher из server.js
-    // Для этого нужно вынести класс Teacher в отдельный файл или использовать его здесь
-    const Teacher = require('./teacher');
-    
-    const client = new Teacher();
-    await client.getInitialData();
+async function getTeacherCalendar(teacherId, cached = null) {
+    let currentWeek, nextWeek;
 
-    await client.changeWeek(0);
-    const currentWeek = await client.getSchedule(teacherId);
+    if (cached && cached.week0 && cached.week1) {
+        currentWeek = cached.week0;
+        nextWeek = cached.week1;
+    } else {
+        const client = new Teacher();
+        await client.getInitialData();
 
-    await client.changeWeek(1);
-    const nextWeek = await client.getSchedule(teacherId);
+        await client.changeWeek(0);
+        currentWeek = await client.getSchedule(teacherId);
+
+        await client.changeWeek(1);
+        nextWeek = await client.getSchedule(teacherId);
+    }
 
     const allEvents = [...currentWeek, ...nextWeek];
-    
+
     // Объединяем события с одинаковым временем
     const mergedEvents = mergeEventsByTime(allEvents);
-    
-    return createICSCalendar(mergedEvents, `Расписание преподавателя - 2 недели`, true);
+
+    return createICSCalendar(mergedEvents, `Расписание преподавателя`, true);
 }
 
 module.exports = {

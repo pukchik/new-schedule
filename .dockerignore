@@ -1,0 +1,23 @@
+node_modules
+.git
+.gitignore
+
+# Cache files
+groups_cache
+schedule_cache.json
+teachers_cache.json
+
+# Documentation
+*.md
+CLAUDE.md
+
+# Docker configs
+Dockerfile
+docker-compose.yml
+Caddyfile
+
+# IDE and OS
+.vscode
+.idea
+*.swp
+.DS_Store

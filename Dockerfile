@@ -2,7 +2,7 @@
 FROM node:18 AS build
 WORKDIR /app
 COPY package*.json ./
-COPY sirinium ./sirinium
+COPY back/sirinium ./back/sirinium
 RUN npm install
 COPY . .
 

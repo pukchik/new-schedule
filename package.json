@@ -2,13 +2,13 @@
   "name": "new-schedule",
   "version": "1.0.0",
   "description": "",
-  "main": "server.js",
+  "main": "back/server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node back/server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "sirinium": "file:./sirinium",
+    "sirinium": "file:./back/sirinium",
     "cors": "^2.8.5",
     "undici": "^5.28.4"
   }
