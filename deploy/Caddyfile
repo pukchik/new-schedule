@@ -1,0 +1,8 @@
+# Caddyfile for schedule-app
+# Caddy automatically handles HTTPS with Let's Encrypt
+
+eralas.ru, lkssosi.ru {
+    reverse_proxy localhost:3000
+
+    encode gzip zstd
+}

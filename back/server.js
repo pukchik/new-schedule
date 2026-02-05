@@ -20,17 +20,19 @@ try {
 
 const app = express();
 app.use(cors());
-app.use(express.static(__dirname));
+app.use(express.static(path.join(__dirname, '..', 'front')));
 
+// Директория для кэша
+const CACHE_DIR = path.join(__dirname, 'cache');
 // Путь к файлу кэша
-const CACHE_FILE = path.join(__dirname, 'schedule_cache.json');
-const TEACHERS_CACHE_FILE = path.join(__dirname, 'teachers_cache.json');
-// Интервал обновления кэша (200 секунд)
-const CACHE_UPDATE_INTERVAL = 200 * 1000;
-// Дополнительная задержка при неудачном обновлении (5 минут)
-const FAILURE_BACKOFF_MS = parseInt(process.env.CACHE_FAILURE_BACKOFF_MS || '300000', 10);
+const CACHE_FILE = path.join(CACHE_DIR, 'schedule_cache.json');
+const TEACHERS_CACHE_FILE = path.join(CACHE_DIR, 'teachers_cache.json');
+// Интервал обновления кэша (20 минут)
+const CACHE_UPDATE_INTERVAL = 20 * 60 * 1000;
+// Дополнительная задержка при неудачном обновлении (40 минут)
+const FAILURE_BACKOFF_MS = parseInt(process.env.CACHE_FAILURE_BACKOFF_MS || '2400000', 10);
 // Директория для файлового кэша по группам
-const GROUP_CACHE_DIR = path.join(__dirname, 'groups_cache');
+const GROUP_CACHE_DIR = path.join(CACHE_DIR, 'groups');
 
 
 // Объект для хранения кэша в памяти
@@ -74,58 +76,68 @@ async function loadGroupsAndTeachers() {
     }
 }
 
-// Функция для обновления кэша
+// Функция для обновления кэша (обе недели)
 async function updateCache() {
     try {
         console.log('Обновление кэша расписания...');
         const newCache = {};
 
-        // Инициализируем один клиент и переиспользуем его для всех групп
         let client;
         try {
             client = new sirinium.Client();
             await client.getInitialData();
-            await client.changeWeek(0);
         } catch (e) {
             console.error('Не удалось инициализировать клиент для групп:', e);
-            return false; // провал обновления
+            return false;
         }
 
         const delayMs = parseInt(process.env.BATCH_DELAY_MS || '120000', 10);
         let failed = false;
+
+        // Получаем текущую неделю для всех групп
+        await client.changeWeek(0);
         for (const group of GROUPS) {
             try {
-                newCache[group] = await client.getGroupSchedule(group);
+                newCache[group] = { week0: await client.getGroupSchedule(group), week1: [] };
             } catch (error) {
                 const cause = error && error.cause ? error.cause : {};
-                console.error(`Ошибка при получении расписания для группы ${group}:`, {
-                    name: error?.name,
-                    message: error?.message,
-                    code: cause?.code,
-                    errno: cause?.errno,
-                    syscall: cause?.syscall,
-                    host: cause?.host,
-                    address: cause?.address,
-                    port: cause?.port
+                console.error(`Ошибка при получении расписания для группы ${group} (week0):`, {
+                    name: error?.name, message: error?.message, code: cause?.code
                 });
-                // При ошибке прерываем цикл и возвращаемся к существующему кэшу
                 failed = true;
                 break;
             }
-            if (delayMs > 0) {
-                await new Promise(r => setTimeout(r, delayMs));
-            }
+            if (delayMs > 0) await new Promise(r => setTimeout(r, delayMs));
         }
 
         if (failed) {
-            console.warn('Обновление кэша прервано. Существующий кэш сохранён без изменений.');
-            return false; // провал обновления
+            console.warn('Обновление кэша прервано (week0).');
+            return false;
         }
 
-        // Убеждаемся, что директория для файлового кэша существует
+        // Получаем следующую неделю для всех групп
+        await client.changeWeek(1);
+        for (const group of GROUPS) {
+            try {
+                newCache[group].week1 = await client.getGroupSchedule(group);
+            } catch (error) {
+                const cause = error && error.cause ? error.cause : {};
+                console.error(`Ошибка при получении расписания для группы ${group} (week1):`, {
+                    name: error?.name, message: error?.message, code: cause?.code
+                });
+                failed = true;
+                break;
+            }
+            if (delayMs > 0) await new Promise(r => setTimeout(r, delayMs));
+        }
+
+        if (failed) {
+            console.warn('Обновление кэша прервано (week1).');
+            return false;
+        }
+
         try { await fs.mkdir(GROUP_CACHE_DIR, { recursive: true }); } catch (_) {}
 
-        // Записываем файловый кэш по группам
         for (const [group, data] of Object.entries(newCache)) {
             const filePath = path.join(GROUP_CACHE_DIR, `${sanitizeFileName(group)}.json`);
             try {
@@ -135,12 +147,11 @@ async function updateCache() {
             }
         }
 
-        // Сохраняем общий кэш в файл и в память (только если цикл завершился успешно)
         await fs.writeFile(CACHE_FILE, JSON.stringify(newCache, null, 2));
         scheduleCache = newCache;
         lastCacheUpdate = Date.now();
         console.log('Кэш успешно обновлен');
-        return true; // успех
+        return true;
     } catch (error) {
         console.error('Ошибка при обновлении кэша:', error);
         return false;
@@ -155,7 +166,7 @@ async function fetchTeacherScheduleFromAPI(teacher, week) {
     return await client.getSchedule(teacher);
 }
 
-// Функция для обновления кэша учителей
+// Функция для обновления кэша учителей (обе недели)
 let teachersCache = {};
 async function updateTeachersCache() {
     try {
@@ -163,52 +174,65 @@ async function updateTeachersCache() {
         const newCache = {};
         const teacherIds = TEACHERS && typeof TEACHERS === 'object' && !Array.isArray(TEACHERS) ? Object.keys(TEACHERS) : TEACHERS;
 
-        // Один клиент для всех преподавателей
         let client;
         try {
             client = new Teacher();
             await client.getInitialData();
-            await client.changeWeek(0);
         } catch (e) {
             console.error('Не удалось инициализировать клиент для преподавателей:', e);
-            return false; // провал обновления
+            return false;
         }
 
         const delayMs = parseInt(process.env.BATCH_DELAY_MS || '120000', 10);
         let failed = false;
+
+        // Получаем текущую неделю
+        await client.changeWeek(0);
         for (const teacherId of teacherIds) {
             try {
-                newCache[teacherId] = await client.getSchedule(teacherId);
+                newCache[teacherId] = { week0: await client.getSchedule(teacherId), week1: [] };
             } catch (error) {
                 const cause = error && error.cause ? error.cause : {};
-                console.error(`Ошибка при получении расписания для преподавателя ${teacherId}:`, {
-                    name: error?.name,
-                    message: error?.message,
-                    code: cause?.code,
-                    errno: cause?.errno,
-                    syscall: cause?.syscall,
-                    host: cause?.host,
-                    address: cause?.address,
-                    port: cause?.port
+                console.error(`Ошибка при получении расписания для преподавателя ${teacherId} (week0):`, {
+                    name: error?.name, message: error?.message, code: cause?.code
                 });
                 failed = true;
                 break;
             }
-            if (delayMs > 0) {
-                await new Promise(r => setTimeout(r, delayMs));
-            }
-        }
-        if (failed) {
-            console.warn('Обновление кэша преподавателей прервано. Существующий кэш сохранён без изменений.');
-            return false; // провал обновления
+            if (delayMs > 0) await new Promise(r => setTimeout(r, delayMs));
         }
 
-        // Сохраняем кэш в файл
+        if (failed) {
+            console.warn('Обновление кэша преподавателей прервано (week0).');
+            return false;
+        }
+
+        // Получаем следующую неделю
+        await client.changeWeek(1);
+        for (const teacherId of teacherIds) {
+            try {
+                newCache[teacherId].week1 = await client.getSchedule(teacherId);
+            } catch (error) {
+                const cause = error && error.cause ? error.cause : {};
+                console.error(`Ошибка при получении расписания для преподавателя ${teacherId} (week1):`, {
+                    name: error?.name, message: error?.message, code: cause?.code
+                });
+                failed = true;
+                break;
+            }
+            if (delayMs > 0) await new Promise(r => setTimeout(r, delayMs));
+        }
+
+        if (failed) {
+            console.warn('Обновление кэша преподавателей прервано (week1).');
+            return false;
+        }
+
         await fs.writeFile(TEACHERS_CACHE_FILE, JSON.stringify(newCache, null, 2));
         teachersCache = newCache;
         lastCacheUpdate = Date.now();
         console.log('Кэш преподавателей успешно обновлен');
-        return true; // успех
+        return true;
     } catch (error) {
         console.error('Ошибка при обновлении кэша преподавателей:', error);
         return false;
@@ -216,16 +240,18 @@ async function updateTeachersCache() {
 }
 
 
-// Загружаем кэш при запуске сервера 
+// Загружаем кэш при запуске сервера (без вызова updateCache - этим займётся планировщик)
 async function loadCache() {
+    // Убеждаемся, что директория кэша существует
+    try { await fs.mkdir(CACHE_DIR, { recursive: true }); } catch (_) {}
+    try { await fs.mkdir(GROUP_CACHE_DIR, { recursive: true }); } catch (_) {}
     try {
         const data = await fs.readFile(CACHE_FILE, 'utf8');
         scheduleCache = JSON.parse(data);
         lastCacheUpdate = Date.now();
         console.log('Кэш загружен из файла');
     } catch (error) {
-        console.log('Кэш не найден, создаем новый...');
-        await updateCache();
+        console.log('Кэш не найден, будет создан планировщиком...');
     }
 }
 
@@ -237,8 +263,7 @@ async function loadTeachersCache() {
         lastCacheUpdate = Date.now();
         console.log('Кэш преподавателей загружен из файла');
     } catch (error) {
-        console.log('Кэш преподавателей не найден, создаем новый...');
-        await updateTeachersCache();
+        console.log('Кэш преподавателей не найден, будет создан планировщиком...');
     }
 }
 
@@ -260,38 +285,28 @@ app.get('/api/schedule', async (req, res) => {
     try {
         const { group, week = 0 } = req.query;
 
-        // Если запрашивается текущая неделя (week=0), предпочтительно читаем из файлового кэша
-        if (week === '0') {
+        // week=0 или week=1 берём из кэша
+        if (week == 0 || week == 1) {
+            const weekKey = week == 0 ? 'week0' : 'week1';
+
+            // Пробуем файловый кэш
             try {
                 const filePath = path.join(GROUP_CACHE_DIR, `${sanitizeFileName(group)}.json`);
                 const content = await fs.readFile(filePath, 'utf8');
-                return res.json(JSON.parse(content));
-            } catch (_) {
-                // файла нет или не читается — fallback ниже
-            }
-            // Если кэш пустой или устарел, обновляем его
-            if (Object.keys(scheduleCache).length === 0 || Date.now() - lastCacheUpdate > CACHE_UPDATE_INTERVAL) {
-                await updateCache();
+                const cached = JSON.parse(content);
+                if (cached[weekKey]) return res.json(cached[weekKey]);
+            } catch (_) {}
+
+            // Пробуем память
+            if (scheduleCache[group] && scheduleCache[group][weekKey]) {
+                return res.json(scheduleCache[group][weekKey]);
             }
 
-            // Проверяем наличие данных для запрошенной группы
-            if (scheduleCache[group]) {
-                return res.json(scheduleCache[group]);
-            } else {
-                // Если данных нет в кэше, получаем их из API
-                const schedule = await fetchScheduleFromAPI(group, 0);
-                scheduleCache[group] = schedule;
-                await fs.writeFile(CACHE_FILE, JSON.stringify(scheduleCache, null, 2));
-                // Пишем также файловый кэш для группы на будущее
-                try {
-                    await fs.mkdir(GROUP_CACHE_DIR, { recursive: true });
-                    const filePath = path.join(GROUP_CACHE_DIR, `${sanitizeFileName(group)}.json`);
-                    await fs.writeFile(filePath, JSON.stringify(schedule, null, 2));
-                } catch (e) {
-                    console.error('Не удалось записать файл кэша группы после прямого запроса:', e?.message);
-                }
-                return res.json(schedule);
-            }
+            // Fallback: запрос к API
+            const schedule = await fetchScheduleFromAPI(group, week);
+            if (!scheduleCache[group]) scheduleCache[group] = { week0: [], week1: [] };
+            scheduleCache[group][weekKey] = schedule;
+            return res.json(schedule);
         } else {
             // Для других недель получаем данные напрямую из API
             const schedule = await fetchScheduleFromAPI(group, week);
@@ -321,7 +336,7 @@ app.get('/api/teachers', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
+    res.sendFile(path.join(__dirname, '..', 'front', 'index.html'));
 });
 
 
@@ -330,23 +345,19 @@ app.get('/api/teacherschedule', async (req, res) => {
     try {
         const { id, week = 0 } = req.query;
 
-        // Если запрашивается текущая неделя (week=0), используем кэш
-        if (week === '0') {
-            // Если кэш пустой или устарел, обновляем его
-            if (Object.keys(teachersCache).length === 0 || Date.now() - lastCacheUpdate > CACHE_UPDATE_INTERVAL) {
-                await updateTeachersCache();
+        // week=0 или week=1 берём из кэша
+        if (week == 0 || week == 1) {
+            const weekKey = week == 0 ? 'week0' : 'week1';
+
+            if (teachersCache[id] && teachersCache[id][weekKey]) {
+                return res.json(teachersCache[id][weekKey]);
             }
 
-            // Проверяем наличие данных для запрошенного учителя
-            if (teachersCache[id]) {
-                return res.json(teachersCache[id]);
-            } else {
-                // Если данных нет в кэше, получаем их из API
-                const schedule = await fetchTeacherScheduleFromAPI(id, 0);
-                teachersCache[id] = schedule;
-                await fs.writeFile(TEACHERS_CACHE_FILE, JSON.stringify(teachersCache, null, 2));
-                return res.json(schedule);
-            }
+            // Fallback: запрос к API
+            const schedule = await fetchTeacherScheduleFromAPI(id, week);
+            if (!teachersCache[id]) teachersCache[id] = { week0: [], week1: [] };
+            teachersCache[id][weekKey] = schedule;
+            return res.json(schedule);
         } else {
             // Для других недель получаем данные напрямую из API
             const schedule = await fetchTeacherScheduleFromAPI(id, week);
@@ -361,15 +372,16 @@ app.get('/api/teacherschedule', async (req, res) => {
 app.get('/calendar/group', async (req, res) => {
     try {
         let { group } = req.query;
-        
+
         if (!group) {
             return res.status(400).json({ error: 'Параметр group обязателен' });
         }
 
-        // Декодируем группу на случай если она закодирована в URL
         group = decodeURIComponent(group);
 
-        const icsCalendar = await calendar.getGroupCalendar(group);
+        // Берём обе недели из кэша
+        const cached = scheduleCache[group] || null;
+        const icsCalendar = await calendar.getGroupCalendar(group, cached);
 
         res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
         res.setHeader('Content-Disposition', `attachment; filename="schedule-${encodeURIComponent(group)}.ics"`);
@@ -384,15 +396,16 @@ app.get('/calendar/group', async (req, res) => {
 app.get('/calendar/teacher', async (req, res) => {
     try {
         let { id } = req.query;
-        
+
         if (!id) {
             return res.status(400).json({ error: 'Параметр id обязателен' });
         }
 
-        // Декодируем id на случай если он закодирован в URL
         id = decodeURIComponent(id);
 
-        const icsCalendar = await calendar.getTeacherCalendar(id);
+        // Берём обе недели из кэша
+        const cached = teachersCache[id] || null;
+        const icsCalendar = await calendar.getTeacherCalendar(id, cached);
 
         res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
         res.setHeader('Content-Disposition', `attachment; filename="schedule-teacher-${encodeURIComponent(id)}.ics"`);
@@ -404,14 +417,16 @@ app.get('/calendar/teacher', async (req, res) => {
 
 
 
-// Загружаем группы, преподавателей и кэш при запуске сервера
+// Загружаем группы, преподавателей и стартуем сервер сразу
 loadGroupsAndTeachers().then(() => {
+    // Стартуем сервер сразу, не дожидаясь загрузки кэша
+    app.listen(3000, '0.0.0.0', () => console.log('Server started on port 3000'));
+
+    // Загружаем кэш в фоне
     loadCache().then(() => {
-        loadTeachersCache().then(() => {
-            app.listen(3000, '0.0.0.0', () => console.log('Server started on port 3000'));
-            // Запускаем планировщики
-            scheduleGroupUpdate();
-            scheduleTeacherUpdate();
-        });
+        scheduleGroupUpdate();
+    });
+    loadTeachersCache().then(() => {
+        scheduleTeacherUpdate();
     });
 });

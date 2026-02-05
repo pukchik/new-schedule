@@ -1,0 +1,14 @@
+services:
+  schedule-app:
+    image: pukchik/new-schedule:test
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - BATCH_DELAY_MS=120000
+      - CACHE_FAILURE_BACKOFF_MS=300000
+    volumes:
+      - schedule-cache:/app/cache
+
+volumes:
+  schedule-cache:
